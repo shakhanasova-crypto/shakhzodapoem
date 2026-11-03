@@ -3,32 +3,31 @@ import pandas as pd
 import re
 from collections import Counter
 from natasha import Segmenter, MorphVocab, NewsEmbedding, NewsMorphTagger, NewsNERTagger, Doc
-
+ 
 VOWELS = "аеёиоуыэюя"
 POS_RU = {"NOUN": "существительное", "VERB": "глагол", "ADJ": "прилагательное", "ADV": "наречие",
           "PRON": "местоимение", "ADP": "предлог", "CCONJ": "союз", "SCONJ": "союз",
           "PART": "частица", "DET": "местоимение-прил.", "PROPN": "имя собственное",
           "NUM": "числительное", "AUX": "вспом. глагол", "INTJ": "междометие"}
-
-# ---------- базовый анализ ----------
+ 
 def load_models():
     emb = NewsEmbedding()
     return dict(seg=Segmenter(), vocab=MorphVocab(), morph=NewsMorphTagger(emb), ner=NewsNERTagger(emb))
-
+ 
 def split_poem(text):
     stanzas = [s for s in re.split(r"\n\s*\n", text.strip()) if s.strip()]
     return [[l.strip() for l in s.split("\n") if l.strip()] for s in stanzas]
-
+ 
 def basic_stats(stanzas):
     lines = [l for s in stanzas for l in s]
     words = re.findall(r"[а-яёА-ЯЁa-zA-Z-]+", " ".join(lines))
     return {"строф": len(stanzas), "строк": len(lines), "слов": len(words),
             "уникальных слов": len({w.lower() for w in words}),
             "слов в строке (среднее)": round(len(words) / max(len(lines), 1), 1)}
-
+ 
 def syllables(line):
     return sum(ch in VOWELS for ch in line.lower())
-
+ 
 def morph_analysis(text, m):
     doc = Doc(text)
     doc.segment(m["seg"]); doc.tag_morph(m["morph"]); doc.tag_ner(m["ner"])
@@ -43,13 +42,15 @@ def morph_analysis(text, m):
         s.normalize(m["vocab"])
         ents.append({"тип": {"PER": "персона", "LOC": "место", "ORG": "организация"}[s.type], "имя": s.normal})
     return rows, ents
-
-# ---------- рифма без ударений ----------
+ 
 def last_word(line):
     words = re.findall(r"[а-яёa-z]+", line.lower())
     return words[-1].replace("ё", "е") if words else ""
-
+ 
 def rhyme_keys(word):
+    """Два ключа рифмы без ударений (эвристика).
+    strong: от предпоследней гласной до конца; безударные гласные после неё заменяются на *
+    weak:   от последней гласной до конца (+ согласная перед ней, если слово кончается на гласную)"""
     pos = [i for i, ch in enumerate(word) if ch in VOWELS]
     if not pos:
         return None, word
@@ -62,34 +63,48 @@ def rhyme_keys(word):
     if last == len(word) - 1 and last > 0 and word[last - 1] not in VOWELS:
         weak = word[last - 1:]
     return strong, weak
-
+ 
 def is_rhyme(w1, w2):
     if not w1 or not w2 or w1 == w2:
         return w1 == w2 and bool(w1)
     s1, k1 = rhyme_keys(w1); s2, k2 = rhyme_keys(w2)
     return (s1 is not None and s1 == s2) or k1 == k2
-
+ 
+ABC = "АБВГДЕЖЗИКЛМНОПРСТУФХЦЧШЭЮЯ"
+ 
+def rhyme_letter(n):
+    """0 -> А, 1 -> Б, ... после Я: А2, Б2, ..."""
+    return ABC[n % len(ABC)] + (str(n // len(ABC) + 1) if n >= len(ABC) else "")
+ 
 def rhyme_scheme(stanza):
     letters, ends = [], []
-    abc = "АБВГДЕЖЗИКЛМН"
     for line in stanza:
         w = last_word(line)
         for j, prev in enumerate(ends):
             if is_rhyme(w, prev):
                 letters.append(letters[j]); break
         else:
-            letters.append(abc[len(set(letters))])
+            letters.append(rhyme_letter(len(set(letters))))
         ends.append(w)
     return letters
-
+ 
 # ---------- стихотворный размер ----------
-METRES = {"хорей": (2, 0), "ямб": (2, 1), "дактиль": (3, 0), "амфибрахий": (3, 1), "анапест": (3, 2)}
+ 
+METRES = {  # название: (период, смещение сильного места; позиции считаются с 0)
+    "хорей": (2, 0), "ямб": (2, 1),
+    "дактиль": (3, 0), "амфибрахий": (3, 1), "анапест": (3, 2),
+}
+# многосложные служебные слова: в стихе обычно безударны, их ударение считаем «слабым»
 WEAK_WORDS = {"передо", "перед", "через", "между", "около", "после", "кроме", "среди", "сквозь",
               "чтобы", "если", "будто", "словно", "только", "даже", "или", "либо", "когда", "пока",
               "над", "надо", "подо", "ото", "изо", "обо", "чего", "чтоб", "ведь", "уже", "еще", "ещё"}
 FEET = {2: "двух", 3: "трёх", 4: "четырёх", 5: "пяти", 6: "шести", 7: "семи", 8: "восьми"}
-
+ 
 def line_syllables(stressed_line):
+    """Строка с ударениями ('+' перед ударной гласной) -> список слогов.
+    Метки: S — ударный слог многосложного слова, s — ударный односложного,
+           u — безударный слог многосложного слова, m — безударное/неизвестное односложное,
+           ? — слог многосложного слова без известного ударения."""
     out = []
     for word in re.findall(r"[а-яёА-ЯЁ+]+", stressed_line):
         w = word.lower()
@@ -99,7 +114,7 @@ def line_syllables(stressed_line):
         if not vow:
             continue
         stress = None
-        if plus:
+        if plus:                                  # позиция гласной сразу после '+'
             p = plus[0]
             stress = sum(1 for i in vow if i < p)
         elif "ё" in clean:
@@ -112,27 +127,28 @@ def line_syllables(stressed_line):
         else:
             out.extend(("S" if k == stress else "u") if stress is not None else "?" for k in range(len(vow)))
     return out
-
+ 
 def score_line(sylls, period, offset):
     strong = lambda i: (i - offset) % period == 0
     good = sum(1 for i, s in enumerate(sylls) if s == "S" and strong(i))
     bad = sum(1 for i, s in enumerate(sylls) if s == "S" and not strong(i))
     light = sum(1 for i, s in enumerate(sylls) if s == "s" and not strong(i))
     return good - 2 * bad - 0.25 * light, bad
-
+ 
 def feet_count(sylls, period, offset):
     stressed = [i for i, s in enumerate(sylls) if s in "Ss"]
     if not stressed:
         return None
-    return sum(1 for i in range(stressed[-1] + 1) if (i - offset) % period == 0)
-
+    last = stressed[-1]
+    return sum(1 for i in range(last + 1) if (i - offset) % period == 0)
+ 
 def clausula(sylls):
     stressed = [i for i, s in enumerate(sylls) if s in "Ss"]
     if not stressed:
         return None
     tail = len(sylls) - 1 - stressed[-1]
     return {0: "мужская", 1: "женская", 2: "дактилическая"}.get(tail, "гипердактилическая")
-
+ 
 def detect_metre(stressed_lines):
     lines = [line_syllables(l) for l in stressed_lines if l.strip()]
     lines = [l for l in lines if l]
@@ -165,7 +181,7 @@ def detect_metre(stressed_lines):
     return {"вердикт": verdict, "уверенно": classic, "таблица": results,
             "схемы": ["".join("—" if s in "Ss" else "∪" for s in sy) for sy in lines],
             "клаузулы": dict(clauses)}
-
+ 
 # ---------- темы ----------
 THEMES = {
     "Любовь и чувства": "любовь любить любимый влюблённый влюбленный сердце нежный нежность страсть страстный поцелуй целовать милый ласка ласковый разлука свидание ревность чувство очи взор",
@@ -184,8 +200,9 @@ THEMES = {
     "Ночь, сон, мечта": "ночь сон сниться мечта мечтать тьма видение виденье призрак тень",
 }
 THEMES = {k: set(v.split()) for k, v in THEMES.items()}
-
-def detect_themes(lemmas):
+ 
+def detect_themes(lemmas, top=3):
+    """lemmas: список лемм стихотворения. Возвращает темы по убыванию числа совпадений."""
     c = Counter(l.lower() for l in lemmas)
     rows = []
     for theme, words in THEMES.items():
@@ -196,27 +213,30 @@ def detect_themes(lemmas):
                          "слова": ", ".join(f"{w} ({k})" if k > 1 else w for w, k in sorted(hits.items(), key=lambda x: -x[1]))})
     rows.sort(key=lambda r: -r["совпадений"])
     return rows
-
-# ---------- ударения и рифма по ударениям ----------
+ 
+# ---------- ударения ----------
 def show_stress(line):
+    """'мгнов+енье' -> 'мгнове́нье' (значок ударения над гласной)."""
     return re.sub(r"\+([аеёиоуыэюяАЕЁИОУЫЭЮЯ])", "\\1\u0301", line)
-
+ 
 def stressed_ending(stressed_word):
+    """Рифменный ключ от ударной гласной до конца; безударные гласные после неё — *."""
     w = stressed_word.lower()
     if "+" not in w:
         return None
-    tail = w[w.index("+") + 1:].replace("+", "").replace("ё", "е")
+    p = w.index("+")
+    tail = w[p + 1:].replace("+", "").replace("ё", "е")
     return tail[0] + "".join("*" if ch in VOWELS else ch for ch in tail[1:])
-
+ 
 def last_stressed_word(stressed_line):
     words = re.findall(r"[а-яёА-ЯЁ+]+", stressed_line)
     return words[-1] if words else ""
-
+ 
 def rhyme_scheme_stressed(stanza, stressed_stanza=None):
+    """Схема рифмовки: по ударениям, если они есть, иначе по окончаниям."""
     if not stressed_stanza:
         return rhyme_scheme(stanza)
     letters, keys = [], []
-    abc = "АБВГДЕЖЗИКЛМН"
     for line, sline in zip(stanza, stressed_stanza):
         k = stressed_ending(last_stressed_word(sline))
         w = last_word(line)
@@ -224,46 +244,47 @@ def rhyme_scheme_stressed(stanza, stressed_stanza=None):
             if (k and pk and k == pk) or ((not k or not pk) and is_rhyme(w, pw)):
                 letters.append(letters[j]); break
         else:
-            letters.append(abc[len(set(letters))])
+            letters.append(rhyme_letter(len(set(letters))))
         keys.append((k, w))
     return letters
-
+ 
 # ================== ИНТЕРФЕЙС САЙТА ==================
 st.set_page_config(page_title="Анализ стихотворения", page_icon="📜", layout="wide")
 st.title("Анализ стихотворения")
 st.caption("Вставьте текст стихотворения. Строфы разделяйте пустой строкой. "
            "Ударения можно поставить самостоятельно знаком + перед ударной гласной (мгнов+енье) — "
            "тогда программа не будет расставлять их сама.")
-
+ 
 @st.cache_resource(show_spinner="Загружаю модели Natasha…")
 def get_models():
     return load_models()
-
+ 
 @st.cache_resource(show_spinner="Загружаю модель ударений (в первый раз 1–3 минуты)…")
 def get_accentizer():
     from ruaccent import RUAccent
     acc = RUAccent()
     acc.load(omograph_model_size="turbo3.1", use_dictionary=False)
     return acc
-
+ 
 EXAMPLE = """Я помню чудное мгновенье:
 Передо мной явилась ты,
 Как мимолетное виденье,
 Как гений чистой красоты.
-
+ 
 В томленьях грусти безнадежной,
 В тревогах шумной суеты,
 Звучал мне долго голос нежный
 И снились милые черты."""
-
+ 
 text = st.text_area("Текст стихотворения", EXAMPLE, height=300)
-
+ 
 if st.button("Анализировать", type="primary") and text.strip():
     clean_text = text.replace("+", "")
     stanzas = split_poem(clean_text)
     raw_stanzas = split_poem(text)
     models = get_models()
-
+ 
+    # --- ударения: вручную (+) или автоматически (ruaccent) ---
     stressed = None
     if "+" in text:
         stressed = raw_stanzas
@@ -275,84 +296,110 @@ if st.button("Анализировать", type="primary") and text.strip():
             stress_note = "Ударения расставлены автоматически (библиотека ruaccent) и могут содержать ошибки."
         except Exception as e:
             stress_note = f"Не удалось загрузить модель ударений ({type(e).__name__}). Поставьте ударения вручную знаком +."
-
+ 
     tabs = st.tabs(["Общее", "Размер", "Рифма", "Темы", "Лексика", "Имена и места"])
-
+ 
+    def tab_error(e):
+        st.error(f"В этом разделе произошла ошибка: {type(e).__name__}: {e}. Остальные вкладки работают.")
+ 
     with tabs[0]:
-        stats = basic_stats(stanzas)
-        cols = st.columns(len(stats))
-        for col, (name, value) in zip(cols, stats.items()):
-            col.metric(name, value)
-
+        try:
+            stats = basic_stats(stanzas)
+            cols = st.columns(len(stats))
+            for col, (name, value) in zip(cols, stats.items()):
+                col.metric(name, value)
+        except Exception as e:
+            tab_error(e)
+ 
     with tabs[1]:
-        st.subheader("Стихотворный размер")
-        if stressed:
-            all_lines = [l for s in stressed for l in s]
-            res = detect_metre(all_lines)
-            if res["уверенно"]:
-                st.success(f"**{res['вердикт'].capitalize()}**")
-            else:
-                st.warning(res["вердикт"].capitalize())
-            if res["клаузулы"]:
-                st.write("Клаузулы (окончания строк):",
-                         ", ".join(f"{k} — {v}" for k, v in res["клаузулы"].items()))
-            lines_df = pd.DataFrame({"строка с ударениями": [show_stress(l) for l in all_lines if l.strip()][:len(res["схемы"])],
-                                     "схема (∪ безударный, — ударный)": res["схемы"]})
-            st.dataframe(lines_df, width="stretch", hide_index=True)
-            with st.expander("Как программа выбирала размер"):
-                st.write("Для каждого размера считается, сколько ударений попало на сильные места (плюс) "
-                         "и сколько на слабые (минус). Побеждает размер с наибольшим числом баллов. "
-                         "Если меньше 75% строк укладываются в размер без нарушений, программа не делает вывод.")
-                st.dataframe(pd.DataFrame(res["таблица"]), width="stretch", hide_index=True)
-        st.caption(stress_note)
-
+        try:
+            st.subheader("Стихотворный размер")
+            if stressed:
+                all_lines = [l for s in stressed for l in s]
+                res = detect_metre(all_lines)
+                if res["уверенно"]:
+                    st.success(f"**{res['вердикт'].capitalize()}**")
+                else:
+                    st.warning(res["вердикт"].capitalize())
+                if res["клаузулы"]:
+                    st.write("Клаузулы (окончания строк):",
+                             ", ".join(f"{k} — {v}" for k, v in res["клаузулы"].items()))
+                metre_lines = [l for l in all_lines if line_syllables(l)]
+                lines_df = pd.DataFrame({"строка с ударениями": [show_stress(l) for l in metre_lines],
+                                         "схема (∪ безударный, — ударный)": res["схемы"]})
+                st.dataframe(lines_df, width="stretch", hide_index=True)
+                with st.expander("Как программа выбирала размер"):
+                    st.write("Для каждого размера считается, сколько ударений попало на сильные места (плюс) "
+                             "и сколько на слабые (минус). Побеждает размер с наибольшим числом баллов. "
+                             "Если меньше 75% строк укладываются в размер без нарушений, программа не делает вывод.")
+                    st.dataframe(pd.DataFrame(res["таблица"]), width="stretch", hide_index=True)
+            st.caption(stress_note)
+        except Exception as e:
+            tab_error(e)
+ 
     with tabs[2]:
-        st.subheader("Строки, слоги и рифма")
-        rows, schemes = [], []
-        for i, stanza in enumerate(stanzas):
-            sst = stressed[i] if stressed and i < len(stressed) else None
-            scheme = rhyme_scheme_stressed(stanza, sst)
-            schemes.append("".join(scheme))
-            for line, letter in zip(stanza, scheme):
-                rows.append({"строфа": i + 1, "строка": line, "слогов": syllables(line),
-                             "последнее слово": last_word(line), "рифма": letter})
-        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-        st.write("Схемы рифмовки по строфам:", " · ".join(schemes))
-        st.caption("Рифма определяется по ударному слогу, а если ударений нет — по окончаниям слов.")
-
-    words, ents = morph_analysis(clean_text, models)
-    wdf = pd.DataFrame(words)
-
+        try:
+            st.subheader("Строки, слоги и рифма")
+            rows, schemes = [], []
+            for i, stanza in enumerate(stanzas):
+                sst = stressed[i] if stressed and i < len(stressed) else None
+                scheme = rhyme_scheme_stressed(stanza, sst)
+                schemes.append("".join(scheme))
+                for line, letter in zip(stanza, scheme):
+                    rows.append({"строфа": i + 1, "строка": line, "слогов": syllables(line),
+                                 "последнее слово": last_word(line), "рифма": letter})
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+            st.write("Схемы рифмовки по строфам:", " · ".join(schemes))
+            st.caption("Рифма определяется по ударному слогу, а если ударений нет — по окончаниям слов.")
+        except Exception as e:
+            tab_error(e)
+ 
+    try:
+        words, ents = morph_analysis(clean_text, models)
+    except Exception:
+        words, ents = [], []
+    wdf = pd.DataFrame(words, columns=["слово", "лемма", "часть речи"])
+ 
     with tabs[3]:
-        st.subheader("Основные темы")
-        th = detect_themes(wdf["лемма"].tolist()) if len(wdf) else []
-        main = [t for t in th if t["совпадений"] >= 2]
-        if main:
-            st.write("**Ведущие темы:** " + ", ".join(t["тема"] for t in main[:3]))
-            st.dataframe(pd.DataFrame(th), width="stretch", hide_index=True,
-                         column_config={"совпадений": st.column_config.ProgressColumn(
-                             "совпадений", format="%d", min_value=0, max_value=max(t["совпадений"] for t in th))})
-        else:
-            st.write("Явных тем по словарям не найдено.")
-        st.caption("Темы определяются по тематическим словарям: программа ищет в стихотворении слова, "
-                   "связанные с каждой темой. Это подсказка для анализа, а не окончательный вывод — "
-                   "метафоры и подтекст словари не видят.")
-
+        try:
+            st.subheader("Основные темы")
+            th = detect_themes(wdf["лемма"].tolist()) if len(wdf) else []
+            main = [t for t in th if t["совпадений"] >= 2]
+            if main:
+                st.write("**Ведущие темы:** " + ", ".join(t["тема"] for t in main[:3]))
+                st.dataframe(pd.DataFrame(th), width="stretch", hide_index=True,
+                             column_config={"совпадений": st.column_config.ProgressColumn(
+                                 "совпадений", format="%d", min_value=0, max_value=max(t["совпадений"] for t in th))})
+            else:
+                st.write("Явных тем по словарям не найдено.")
+            st.caption("Темы определяются по тематическим словарям: программа ищет в стихотворении слова, "
+                       "связанные с каждой темой. Это подсказка для анализа, а не окончательный вывод — "
+                       "метафоры и подтекст словари не видят.")
+        except Exception as e:
+            tab_error(e)
+ 
     with tabs[4]:
-        c1, c2 = st.columns(2)
-        with c1:
-            st.subheader("Части речи")
-            st.bar_chart(wdf["часть речи"].value_counts())
-        with c2:
-            st.subheader("Самые частые значимые слова (леммы)")
-            content = wdf[wdf["часть речи"].isin(["существительное", "глагол", "прилагательное", "наречие"])]
-            top = content["лемма"].value_counts().head(15).rename_axis("лемма").reset_index(name="раз")
-            st.dataframe(top, width="stretch", hide_index=True)
-
+        try:
+            c1, c2 = st.columns(2)
+            with c1:
+                st.subheader("Части речи")
+                st.bar_chart(wdf["часть речи"].value_counts())
+            with c2:
+                st.subheader("Самые частые значимые слова (леммы)")
+                content = wdf[wdf["часть речи"].isin(["существительное", "глагол", "прилагательное", "наречие"])]
+                top = content["лемма"].value_counts().head(15).rename_axis("лемма").reset_index(name="раз")
+                st.dataframe(top, width="stretch", hide_index=True)
+        except Exception as e:
+            tab_error(e)
+ 
     with tabs[5]:
-        if ents:
-            st.dataframe(pd.DataFrame(ents), width="stretch", hide_index=True)
-            st.caption("В стихах каждая строка начинается с заглавной буквы, поэтому NER иногда "
-                       "принимает обычные слова за имена.")
-        else:
-            st.write("Имён и мест не найдено.")
+        try:
+            if ents:
+                st.dataframe(pd.DataFrame(ents), width="stretch", hide_index=True)
+                st.caption("В стихах каждая строка начинается с заглавной буквы, поэтому NER иногда "
+                           "принимает обычные слова за имена.")
+            else:
+                st.write("Имён и мест не найдено.")
+        except Exception as e:
+            tab_error(e)
+ 
