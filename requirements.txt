@@ -2,3 +2,4 @@
      natasha
      pandas
      ruaccent
+setuptools<81
